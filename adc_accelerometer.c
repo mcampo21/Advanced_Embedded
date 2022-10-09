@@ -3,14 +3,15 @@
 #include <stdlib.h>
 
 /***************************************************************************
- * accel_display.c
+ * adc_accelerometer.c
  * ECGR 5431: Lab 5
  * Date: 10/6/22
  * Group 14: Michael Campo, Jeremie Tuzizila
  *
- * This code will enable an ADC to read voltage from a potentiometer.
- * A digit of the sampled value between 0-1023 will be shown on a 7-segment
- * display dependent on the read voltage value in its proper digit place. :)
+ * This code will enable an ADC to read voltage from an accelerometer.
+ * The value of this will either be displayed as raw sampled from the ADC
+ * or it will be converted into a gravity value in accordance to the
+ * accelerometer sensitivity. A button can be pressed to switch between modes.
  *
  ***************************************************************************/
 
@@ -29,13 +30,15 @@
 #define MINUS   (~0x01)
 #define X_AXIS  (~0x37)
 #define Y_AXIS  (~0x3B)
-#define TIMER_DELAY_MS  3000    // 3s delay time
+#define MEDIAN  479                 // zero bias value for accelerometer
+#define TIMER_DELAY_MS  3000        // 3s delay time
 
 /* Global variables */
 unsigned int first=0, second=0, third=0, fourth=0, old_val=0;
-unsigned int adc_samples[3];
-unsigned int Axis = 0;          // X=0, Y=1, Z=2
+unsigned int adc_samples[8];
+unsigned int Axis = 0;              // X=0, Y=1, Z=2
 unsigned int TCount = 0;
+unsigned int DisplayState = 0;      // picks state A=0, B=1
 
 /* Function Prototypes */
 void portInit(void);
@@ -49,19 +52,26 @@ void displayDigit(int);
 
 int main(void)
 {
-    portInit();
-    timerInit();
+    portInit();             // initialize ports
+    timerInit();            // initialize timer
     _enable_interrupt();
     TACCR0 = 1000 - 1;      // start timer
 
     while(1){
-        int read_val = sampleADC(old_val, Axis);
-        //int keyVal = getKey(readVal);
-        //display_A(keyVal, Axis);
-        int gravity_val = getGravity(read_val);
-        display_B(gravity_val, Axis);
-        old_val = read_val;
-        __delay_cycles(10000);
+        int read_val = sampleADC(old_val, Axis);        // sample ADC value from accelerometer
+
+        if (~DisplayState) {                            // DisplayState acts as flag to determine display mode
+            int keyVal = getKey(read_val);              // split raw ADC into values place
+            display_A(keyVal, Axis);                    // display raw ADC value
+
+        }
+        else{
+            int gravity_val = getGravity(read_val);     // convert raw ADC to gravity value
+            display_B(gravity_val, Axis);               // display axis and gravity value
+        }
+
+        old_val = read_val;                             // store current value for comparison
+        __delay_cycles(1000);
     }
 
 }
@@ -75,17 +85,24 @@ int main(void)
 void portInit(void)
 {
     WDTCTL = WDTPW | WDTHOLD;               // stop watchdog timer
-    P1DIR = 0xF0;                           // set pins P1.4 - P1.7 to output
+    P1DIR = 0x17;                           // set pins P1.0-P1.2, P1.4 to output
     P2DIR |= 0xFF;                          // set P2 pins to output
     P2OUT = 0x00;                           // reset all P2 output pins to clear 7-seg
-    P2SEL &= ~(BIT6 + BIT7);                 // turn off XIN & XOUT to enable P2.6
-    P1SEL |= 0x07;                          // set P1.0 - P1.2 to analog input
+    P2SEL &= ~(BIT6 + BIT7);                // turn off XIN & XOUT to enable P2.6
+    P1SEL |= (BIT5 + BIT6 + BIT7);          // set P1.5 - P1.7 to analog input
 
     /* Configure ADC Channels */
-    ADC10CTL1 = INCH_3 + ADC10DIV_3 + CONSEQ_1; // select channel A3, CLK/3, repeat sequence of channels
+    ADC10CTL1 = INCH_7 + ADC10DIV_3 + CONSEQ_1; // select channel A7, CLK/3, repeat sequence of channels
     ADC10CTL0 = ADC10SHT_3 + MSC + ADC10ON;     // sample/hold 64 cycle, multiple sample, turn on ADC10
-    ADC10AE0 = 0x07;                            // enable P1.0 - P1.2 for analog input
-    ADC10DTC1 = 3;                              // transfer block is 3 wide
+    ADC10AE0 = (BIT5 + BIT6 + BIT7);            // enable P1.5 - P1.7 for analog input
+    ADC10DTC1 = 7;                              // transfer block is 7 wide
+
+    /*  Configure Button as interrupt  */
+    P1REN |= BIT3;
+    P1OUT |= BIT3;
+    P1IE |= BIT3;
+    P1IES &= ~(BIT3);
+    P1IFG = 0x00;                           // clear interrupt flags
 }
 
 
@@ -96,7 +113,6 @@ void portInit(void)
  */
 void timerInit(void)
 {
-
     /* Configure Timer */
     TACCR0 = 0;                         // Initially, stop the timer
     TACCTL0 |= CCIE;                    // Enable interrupt for CCR0
@@ -186,18 +202,18 @@ int getKey(int read_val)
  */
 int getGravity(int readVal)
 {
-    unsigned int target = 512;
+    unsigned int target = MEDIAN;
     unsigned int count = 0;
 
-    if (readVal == 512){                    // Middle place 0
+    if ((readVal > MEDIAN-4) && (readVal < MEDIAN+4)){                    // Middle place 0
         first = 0;
         second = 0;
         return 1;
     }
 
-    else if (readVal < 512){                                // Find negative value
+    else if (readVal < MEDIAN){                             // Find negative value
         while((target > readVal) && (target > 2)){          // Continue incrementing down until target is less than ADC value
-            target -= 17;                                   // Range of 17 values per 0.1
+            target -= 9;                                    // Range of 17 values per 0.1
             count++;
         }
         first = count % 10;
@@ -206,9 +222,9 @@ int getGravity(int readVal)
         return 0;
     }
 
-    else if (readVal > 512){                     // Find positive value
+    else if (readVal > MEDIAN){                     // Find positive value
         while((target < readVal) && (target < 1022)){
-            target += 17;
+            target += 10;
             count++;
         }
         first = count % 10;
@@ -220,121 +236,162 @@ int getGravity(int readVal)
     return 0;
 }
 
+/*
+ * Function:  display_A
+ * ----------------------
+ * This function is used to display the raw ADC values
+ * as required by part A of the lab.
+ *
+ */
 void display_A(int keyVal, int Axis)
 {
+    P1OUT &= BIT3;
     // use P2.0 - P2.7 for digit display
     // use P1.4 - P1.7 for place selection
     switch(keyVal) {                // Use key to determine display length of values
 
     case 1:
-        P1OUT = BIT4;               // Select ones place LED
+        P1OUT |= BIT4;               // Select ones place LED
         displayDigit(first);        // Call function to display value
         break;
 
     case 2:
-        P1OUT = BIT4;
+        P1OUT |= BIT4;
         displayDigit(first);
         __delay_cycles(2000);
-        P1OUT = BIT5;
+        P1OUT ^= BIT4;
+        P1OUT |= BIT2;
         displayDigit(second);
         break;
 
     case 3:
-        P1OUT = BIT4;
+        P1OUT |= BIT4;
         displayDigit(first);
         __delay_cycles(2000);
-        P1OUT = BIT5;
+        P1OUT ^= BIT4;
+        P1OUT |= BIT2;
         displayDigit(second);
         __delay_cycles(2000);
-        P1OUT = BIT6;
+        P1OUT ^= BIT2;
+        P1OUT |= BIT1;
         displayDigit(third);
         break;
 
     case 4:
-        P1OUT = BIT4;
+        P1OUT |= BIT4;
         displayDigit(first);
         __delay_cycles(2000);
-        P1OUT = BIT5;
+        P1OUT ^= BIT4;
+        P1OUT |= BIT2;
         displayDigit(second);
         __delay_cycles(2000);
-        P1OUT = BIT6;
+        P1OUT ^= BIT2;
+        P1OUT |= BIT1;
         displayDigit(third);
         __delay_cycles(2000);
-        P1OUT = BIT7;
+        P1OUT ^= BIT1;
+        P1OUT |= BIT0;
         displayDigit(fourth);
         break;
 
     default:
-        P1OUT = 0x00;
+        P1OUT &= BIT3;
     }
 
     __delay_cycles(2000);
+    P1OUT ^= BIT1;
 
     switch(Axis) {
     case 0:
-        P1OUT = BIT4;
-        P2OUT = DP;
+        P1OUT |= BIT4;      // Select decimal point location
+        P2OUT = DP;         // display decimal point
         break;
     case 1:
-        P1OUT = BIT5;
+        P1OUT |= BIT2;
         P2OUT = DP;
         break;
     case 2:
-        P1OUT = BIT6;
+        P1OUT |= BIT1;
         P2OUT = DP;
         break;
     default:
-        P1OUT = BIT7;
+        P1OUT |= BIT7;
         P2OUT |= ~0;
     }
 }
 
+/*
+ * Function:  display_B
+ * ----------------------
+ * This function is used to display the gravity values
+ * as required by part B of the lab.
+ *
+ */
 void display_B(int gravity_val, int Axis)
 {
-    // use P2.0 - P2.7 for digit display
-    // use P1.4 - P1.7 for place selection
+    unsigned int sign = 0xFF;       // create sign flag with value
+    if (gravity_val == 0){          // if gravity flag is negative (0), display MINUS sign
+        sign = MINUS;
+    }
+    P1OUT &= BIT3;
+
     switch(Axis){
     case 0:
-        P1OUT = BIT4;
+        P1OUT |= BIT4;
         displayDigit(first);
         __delay_cycles(2000);
-        P1OUT = BIT5;
+        P1OUT ^= BIT4;
+        P1OUT |= BIT2;
         displayDigit(second);
         P2OUT &= DP;
         __delay_cycles(2000);
-        P1OUT = BIT6;
-        P2OUT = MINUS;
+        P1OUT ^= BIT2;
+        P1OUT |= BIT1;
+        P2OUT = sign;
         __delay_cycles(2000);
-        P1OUT = BIT7;
+        P1OUT ^= BIT1;
+        P1OUT |= BIT0;
         P2OUT = X_AXIS;
         break;
 
     case 1:
-        P1OUT = BIT4;
+        P1OUT |= BIT4;
         displayDigit(first);
         __delay_cycles(2000);
-        P1OUT = BIT5;
+        P1OUT ^= BIT4;
+        P1OUT |= BIT2;
         displayDigit(second);
         P2OUT &= DP;
         __delay_cycles(2000);
-        P1OUT = BIT7;
+        P1OUT ^= BIT2;
+        P1OUT |= BIT1;
+        P2OUT = sign;
+        __delay_cycles(2000);
+        P1OUT ^= BIT1;
+        P1OUT |= BIT0;
         P2OUT = Y_AXIS;
         break;
 
     case 2:
-        P1OUT = BIT4;
+        P1OUT |= BIT4;
         displayDigit(first);
         __delay_cycles(2000);
-        P1OUT = BIT5;
+        P1OUT ^= BIT4;
+        P1OUT |= BIT2;
         displayDigit(second);
         P2OUT &= DP;
         __delay_cycles(2000);
-        P1OUT = BIT7;
+        P1OUT ^= BIT2;
+        P1OUT |= BIT1;
+        P2OUT = sign;
+        __delay_cycles(2000);
+        P1OUT ^= BIT1;
+        P1OUT |= BIT0;
         P2OUT = TWO;                // Use 2 for Z-axis display
         break;
 
     default:
-        P1OUT = 0x00;
+        P1OUT &= BIT3;
     }
 }
 
@@ -396,5 +453,12 @@ __interrupt void Timer_A_CCR0_ISR(void) {
         else{Axis++;}
         TCount = 0;                 // reset count value
     }
+}
+// Port 1 ISR
+#pragma vector = PORT1_VECTOR
+__interrupt void PORT1_ISR(void) {
+    DisplayState = ~(DisplayState);
+    __delay_cycles(10000);
+    P1IFG &= ~BIT3;                     // clear P1.3 interrupt flag
 }
 
